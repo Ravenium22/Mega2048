@@ -86,19 +86,74 @@ export function useTransactions() {
         getWalletClient();
     }, [user, ready, wallets]);
 
+    // Get current gas price from the network
+    async function getCurrentGasPrices() {
+        try {
+            // Get current base fee
+            const latestBlock = await publicClient.getBlock();
+            const baseFeePerGas = latestBlock.baseFeePerGas || parseGwei("1");
+            
+            // Set maxFeePerGas to baseFee * 2 for better chances of inclusion
+            // Set maxPriorityFeePerGas to a reasonable tip
+            const maxFeePerGas = baseFeePerGas * 2n;
+            const maxPriorityFeePerGas = parseGwei("1"); // 1 Gwei tip
+            
+            console.log("Current base fee:", baseFeePerGas.toString());
+            console.log("Max fee per gas:", maxFeePerGas.toString());
+            console.log("Max priority fee:", maxPriorityFeePerGas.toString());
+            
+            return { maxFeePerGas, maxPriorityFeePerGas };
+        } catch (error) {
+            console.warn("Failed to get current gas prices, using defaults:", error);
+            // Fallback to higher defaults if network call fails
+            return {
+                maxFeePerGas: parseGwei("2.0"), // Increased from 0.05
+                maxPriorityFeePerGas: parseGwei("1.0"), // Increased from 0.01
+            };
+        }
+    }
+
+    // Estimate gas for a transaction
+    async function estimateGas(data: Hex): Promise<bigint> {
+        try {
+            const privyUserAddress = userAddress.current;
+            if (!privyUserAddress) {
+                throw new Error("User address not available");
+            }
+
+            const estimatedGas = await publicClient.estimateGas({
+                account: privyUserAddress as Hex,
+                to: GAME_CONTRACT_ADDRESS,
+                data,
+            });
+
+            // Add 20% buffer to the estimated gas
+            const gasWithBuffer = (estimatedGas * 120n) / 100n;
+            
+            console.log("Estimated gas:", estimatedGas.toString());
+            console.log("Gas with buffer:", gasWithBuffer.toString());
+            
+            return gasWithBuffer;
+        } catch (error) {
+            console.warn("Gas estimation failed, using fallback:", error);
+            // Return a conservative fallback gas limit
+            return BigInt(100000); // Reduced from 300k/200k
+        }
+    }
+
     // Sends a transaction and wait for receipt.
     async function sendRawTransactionAndConfirm({
         successText,
-        gas,
         data,
         nonce,
-        maxFeePerGas = parseGwei("0.05"),
-        maxPriorityFeePerGas = parseGwei("0.01"),
+        gas,
+        maxFeePerGas,
+        maxPriorityFeePerGas,
     }: {
         successText?: string;
-        gas: BigInt;
         data: Hex;
         nonce: number;
+        gas?: BigInt;
         maxFeePerGas?: BigInt;
         maxPriorityFeePerGas?: BigInt;
     }) {
@@ -115,6 +170,14 @@ export function useTransactions() {
                 throw Error("Privy user not found.");
             }
 
+            // Get current gas prices if not provided
+            const gasParams = maxFeePerGas && maxPriorityFeePerGas 
+                ? { maxFeePerGas, maxPriorityFeePerGas }
+                : await getCurrentGasPrices();
+
+            // Estimate gas if not provided
+            const gasLimit = gas || await estimateGas(data);
+
             const startTime = Date.now();
             // Sign with explicit EIP-1559 parameters
             const signedTransaction = await provider.signTransaction({
@@ -122,9 +185,9 @@ export function useTransactions() {
                 account: privyUserAddress,
                 data,
                 nonce,
-                gas,
-                maxFeePerGas,
-                maxPriorityFeePerGas,
+                gas: gasLimit,
+                maxFeePerGas: gasParams.maxFeePerGas,
+                maxPriorityFeePerGas: gasParams.maxPriorityFeePerGas,
             });
 
             
@@ -311,6 +374,36 @@ export function useTransactions() {
         // Sign and send transaction: start game
         console.log("Starting game!");
 
+        const data = encodeFunctionData({
+            abi: [
+                {
+                    type: "function",
+                    name: "startGame",
+                    inputs: [
+                        {
+                            name: "gameId",
+                            type: "bytes32",
+                            internalType: "bytes32",
+                        },
+                        {
+                            name: "boards",
+                            type: "uint128[4]",
+                            internalType: "uint128[4]",
+                        },
+                        {
+                            name: "moves",
+                            type: "uint8[3]",
+                            internalType: "uint8[3]",
+                        },
+                    ],
+                    outputs: [],
+                    stateMutability: "nonpayable",
+                },
+            ],
+            functionName: "startGame",
+            args: [gameId, boards, moves],
+        });
+
         const nonce = userNonce.current;
         userNonce.current = nonce + 1;
         userBalance.current = balance - parseEther("0.0075");
@@ -318,38 +411,8 @@ export function useTransactions() {
         await sendRawTransactionAndConfirm({
             nonce: nonce,
             successText: "Started game!",
-            gas: BigInt(300_000), 
-            data: encodeFunctionData({
-                abi: [
-                    {
-                        type: "function",
-                        name: "startGame",
-                        inputs: [
-                            {
-                                name: "gameId",
-                                type: "bytes32",
-                                internalType: "bytes32",
-                            },
-                            {
-                                name: "boards",
-                                type: "uint128[4]",
-                                internalType: "uint128[4]",
-                            },
-                            {
-                                name: "moves",
-                                type: "uint8[3]",
-                                internalType: "uint8[3]",
-                            },
-                        ],
-                        outputs: [],
-                        stateMutability: "nonpayable",
-                    },
-                ],
-                functionName: "startGame",
-                args: [gameId, boards, moves],
-            }),
-            maxFeePerGas: parseGwei("0.05"), 
-            maxPriorityFeePerGas: parseGwei("0.01"),
+            data,
+            // Let the function estimate gas and get current gas prices
         });
     }
 
@@ -367,6 +430,36 @@ export function useTransactions() {
             throw Error("Signer has insufficient balance.");
         }
 
+        const data = encodeFunctionData({
+            abi: [
+                {
+                    type: "function",
+                    name: "play",
+                    inputs: [
+                        {
+                            name: "gameId",
+                            type: "bytes32",
+                            internalType: "bytes32",
+                        },
+                        {
+                            name: "move",
+                            type: "uint8",
+                            internalType: "uint8",
+                        },
+                        {
+                            name: "resultBoard",
+                            type: "uint128",
+                            internalType: "uint128",
+                        },
+                    ],
+                    outputs: [],
+                    stateMutability: "nonpayable",
+                },
+            ],
+            functionName: "play",
+            args: [gameId, move, board],
+        });
+
         const nonce = userNonce.current;
         userNonce.current = nonce + 1;
         userBalance.current = balance - parseEther("0.005");
@@ -374,38 +467,8 @@ export function useTransactions() {
         await sendRawTransactionAndConfirm({
             nonce,
             successText: `Played move ${moveCount}`,
-            gas: BigInt(200_000), 
-            data: encodeFunctionData({
-                abi: [
-                    {
-                        type: "function",
-                        name: "play",
-                        inputs: [
-                            {
-                                name: "gameId",
-                                type: "bytes32",
-                                internalType: "bytes32",
-                            },
-                            {
-                                name: "move",
-                                type: "uint8",
-                                internalType: "uint8",
-                            },
-                            {
-                                name: "resultBoard",
-                                type: "uint128",
-                                internalType: "uint128",
-                            },
-                        ],
-                        outputs: [],
-                        stateMutability: "nonpayable",
-                    },
-                ],
-                functionName: "play",
-                args: [gameId, move, board],
-            }),
-            maxFeePerGas: parseGwei("0.05"), 
-            maxPriorityFeePerGas: parseGwei("0.01"),
+            data,
+            // Let the function estimate gas and get current gas prices
         });
     }
 
