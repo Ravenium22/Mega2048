@@ -86,29 +86,50 @@ export function useTransactions() {
         getWalletClient();
     }, [user, ready, wallets]);
 
-    // Get current gas price from the network
+    // Get current gas price from the network with proper EIP-1559 structure
     async function getCurrentGasPrices() {
         try {
-            // Get current base fee
+            // Get current base fee and gas price for reference
             const latestBlock = await publicClient.getBlock();
+            const gasPrice = await publicClient.getGasPrice();
             const baseFeePerGas = latestBlock.baseFeePerGas || parseGwei("1");
             
-            // Set maxFeePerGas to baseFee * 2 for better chances of inclusion
-            // Set maxPriorityFeePerGas to a reasonable tip
-            const maxFeePerGas = baseFeePerGas * 2n;
-            const maxPriorityFeePerGas = parseGwei("1"); // 1 Gwei tip
+            // Calculate proper EIP-1559 pricing
+            // Priority fee should be reasonable (0.5-2 gwei)
+            const maxPriorityFeePerGas = baseFeePerGas < parseGwei("1") 
+                ? parseGwei("0.5")  // 0.5 gwei for low base fee
+                : parseGwei("2.0"); // 2 gwei for higher base fee
             
-            console.log("Current base fee:", baseFeePerGas.toString());
-            console.log("Max fee per gas:", maxFeePerGas.toString());
-            console.log("Max priority fee:", maxPriorityFeePerGas.toString());
+            // Max fee should be much higher than priority fee
+            // Use the higher of: (baseFee * 2 + priority) or (gasPrice + priority)
+            const calculatedMaxFee = (baseFeePerGas * 2n) + maxPriorityFeePerGas;
+            const gasPriceBasedFee = gasPrice + maxPriorityFeePerGas;
+            const maxFeePerGas = calculatedMaxFee > gasPriceBasedFee ? calculatedMaxFee : gasPriceBasedFee;
+            
+            console.log("🔍 Network gas conditions:");
+            console.log("  Base fee per gas:", formatEther(baseFeePerGas), "ETH");
+            console.log("  Current gas price:", formatEther(gasPrice), "ETH");
+            console.log("  Priority fee:", formatEther(maxPriorityFeePerGas), "ETH");
+            console.log("  Max fee per gas:", formatEther(maxFeePerGas), "ETH");
+            
+            // Validation check - ensure maxFeePerGas > maxPriorityFeePerGas
+            if (maxPriorityFeePerGas >= maxFeePerGas) {
+                console.warn("⚠️ Invalid gas pricing detected, adjusting...");
+                const adjustedMaxFee = maxPriorityFeePerGas * 3n; // Ensure maxFee is at least 3x priority
+                console.log("  Adjusted max fee:", formatEther(adjustedMaxFee), "ETH");
+                return {
+                    maxFeePerGas: adjustedMaxFee,
+                    maxPriorityFeePerGas: maxPriorityFeePerGas
+                };
+            }
             
             return { maxFeePerGas, maxPriorityFeePerGas };
         } catch (error) {
-            console.warn("Failed to get current gas prices, using defaults:", error);
-            // Fallback to higher defaults if network call fails
+            console.warn("⚠️ Failed to get current gas prices, using safe fallbacks:", error);
+            // Ultra-safe fallbacks with proper EIP-1559 structure
             return {
-                maxFeePerGas: parseGwei("2.0"), // Increased from 0.05
-                maxPriorityFeePerGas: parseGwei("1.0"), // Increased from 0.01
+                maxFeePerGas: parseGwei("10.0"),    // 10 gwei - generous max fee
+                maxPriorityFeePerGas: parseGwei("2.0"), // 2 gwei - reasonable tip
             };
         }
     }
@@ -127,17 +148,18 @@ export function useTransactions() {
                 data,
             });
 
-            // Add 20% buffer to the estimated gas
-            const gasWithBuffer = (estimatedGas * 120n) / 100n;
+            // Add 25% buffer to the estimated gas (more generous than 20%)
+            const gasWithBuffer = (estimatedGas * 125n) / 100n;
             
-            console.log("Estimated gas:", estimatedGas.toString());
-            console.log("Gas with buffer:", gasWithBuffer.toString());
+            console.log("⛽ Gas estimation:");
+            console.log("  Estimated gas:", estimatedGas.toString());
+            console.log("  Gas with buffer:", gasWithBuffer.toString());
             
             return gasWithBuffer;
         } catch (error) {
-            console.warn("Gas estimation failed, using fallback:", error);
-            // Return a conservative fallback gas limit
-            return BigInt(100000); // Reduced from 300k/200k
+            console.warn("⚠️ Gas estimation failed, using conservative fallback:", error);
+            // Return a conservative fallback gas limit (reduced from original fixed limits)
+            return BigInt(120000); // Conservative fallback between 100k-150k
         }
     }
 
@@ -178,6 +200,11 @@ export function useTransactions() {
             // Estimate gas if not provided
             const gasLimit = gas || await estimateGas(data);
 
+            console.log("🚀 Transaction parameters:");
+            console.log("  Gas limit:", gasLimit.toString());
+            console.log("  Max fee per gas:", formatEther(gasParams.maxFeePerGas), "ETH");
+            console.log("  Priority fee:", formatEther(gasParams.maxPriorityFeePerGas), "ETH");
+
             const startTime = Date.now();
             // Sign with explicit EIP-1559 parameters
             const signedTransaction = await provider.signTransaction({
@@ -216,14 +243,14 @@ export function useTransactions() {
             const time = Date.now() - startTime;
 
             if (response.error) {
-                console.log(`Failed sent in ${time} ms`);
+                console.log(`❌ Transaction failed in ${time} ms:`, response.error.message);
                 throw Error(response.error.message);
             }
 
             const transactionHash: Hex = response.result;
 
             // Fire toast info with benchmark and transaction hash.
-            console.log(`Transaction sent in ${time} ms: ${response.result}`);
+            console.log(`✅ Transaction sent in ${time} ms: ${response.result}`);
             toast.info(`Sent transaction.`, {
                 description: `${successText} Time: ${time} ms`,
                 action: (
@@ -252,7 +279,7 @@ export function useTransactions() {
 
             if (receipt.status == "reverted") {
                 console.log(
-                    `Failed confirmation in ${Date.now() - startTime} ms`
+                    `❌ Transaction reverted in ${Date.now() - startTime} ms`
                 );
                 throw Error(
                     `Failed to confirm transaction: ${transactionHash}`
@@ -260,7 +287,7 @@ export function useTransactions() {
             }
 
             console.log(
-                `Transaction confirmed in ${Date.now() - startTime} ms: ${
+                `✅ Transaction confirmed in ${Date.now() - startTime} ms: ${
                     response.result
                 }`
             );
@@ -289,6 +316,7 @@ export function useTransactions() {
         } catch (error) {
             e = error as Error;
 
+            console.error("❌ Transaction failed:", e.message);
             toast.error(`Failed to send transaction.`, {
                 description: `Error: ${e.message}`,
             });
@@ -372,7 +400,7 @@ export function useTransactions() {
         }
 
         // Sign and send transaction: start game
-        console.log("Starting game!");
+        console.log("🎮 Starting game!");
 
         const data = encodeFunctionData({
             abi: [
@@ -423,7 +451,7 @@ export function useTransactions() {
         moveCount: number
     ): Promise<void> {
         // Sign and send transaction: play move
-        console.log(`Playing move ${moveCount}!`);
+        console.log(`🎮 Playing move ${moveCount}!`);
 
         const balance = userBalance.current;
         if (parseFloat(formatEther(balance)) < 0.01) {
